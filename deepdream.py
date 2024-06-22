@@ -4,69 +4,69 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as transforms
-from torchvision.models import inception_v3, Inception_V3_Weights
 
 import numpy as np
-import IPython.display as display
 import PIL.Image
 from tqdm.auto import tqdm
 
-from typing import List, Union, Any
+from typing import List, Any, Dict, Tuple, Union
+from collections import OrderedDict
 import logging
 
-logger = create_simple_logger("deapdream", env.LOG_LEVEL)
+logger = create_simple_logger("deepdream", env.LOG_LEVEL)
+
+END = "\033[0m"
+BOLD = "\033[1m"
+BROWN = "\033[0;33m"
+ITALIC = "\033[3m"
 
 
-class DeapDreamModel(nn.Module):
-    def __init__(
-        self,
-        base_model: nn.Module,
-        block_names_to_select: List[str],
-        logger: logging.Logger = None,
-    ):
-        super(DeapDreamModel, self).__init__()
-        self.logger = logger or logging.getLogger(self.__class__.__name__)
-        self.blocks, self.block_indices_to_maximize = self._get_blocks(
-            base_model, block_names_to_select
-        )
+def print_model_tree(
+    model_tree: Dict[str, Union[nn.Module, Dict[str, nn.Module]]],
+    indent: int = 0,
+    add_modules: bool = False,
+):
+    for name, module in model_tree.items():
+        ended = False
+        print(" " * indent + f"{BOLD}{name}{END}:", end="")
 
-    def _get_blocks(
-        self, base_model: nn.Module, block_names_to_select: List[str]
-    ) -> List[nn.Module]:
+        if isinstance(module, dict):
+            if not ended:
+                print()
+            print_model_tree(module, indent + 2, add_modules=add_modules)
+        else:
+            if add_modules:
+                print(f"{' ' * (indent+2)}{ITALIC}{module}{END}", end="")
+        if not ended:
+            print()
 
-        block_names, blocks = zip(*base_model.named_children())
-        self.logger.info(f"Number of blocks: {len(blocks)}")
-        max_block_number = 0
-        block_indices_to_maximize = []
 
-        for i, name in enumerate(block_names):
-            for b in block_names_to_select:
-                if b in name:
-                    block_indices_to_maximize.append(i)
-                    max_block_number = i
-        self.logger.info(f"Block indices to maximize: {block_indices_to_maximize}")
+def create_all_possible_submodule_keys(
+    tree: Dict[str, Union[nn.Module, Dict[str, nn.Module]]], prefix: str = ""
+) -> List[str]:
+    keys = []
+    for name, module in tree.items():
+        if isinstance(module, dict):
+            keys.extend(
+                create_all_possible_submodule_keys(module, prefix=f"{prefix}{name}.")
+            )
+        else:
+            keys.append(f"{prefix}{name}")
+    return keys
 
-        layers_to_take_for_model = []
-        for i in range(max_block_number + 1):
-            layers_to_take_for_model.append(blocks[i])
-        return layers_to_take_for_model, block_indices_to_maximize
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        activations = []
-        for i, block in enumerate(self.blocks):
-            x = block(x)
-            if i in self.block_indices_to_maximize:
-                activations.append(x)
-        return activations
+def get_model_tree(
+    model: nn.Module,
+) -> Dict[str, Union[nn.Module, Dict[str, nn.Module]]]:
+    model_tree = OrderedDict()
+    for name, module in model.named_children():
+        if len(list(module.children())) > 0:
+            model_tree[name] = get_model_tree(module)
+        else:
+            # if the module has no children, it is a leaf node, add it to the tree
+            model_tree[name] = module
 
-    def __str__(self) -> str:
-        string = str(self.blocks)
-        # add a tab to each line
-        final_string = f"""{self.__class__.__name__}(\n{string}\n)"""
-        return final_string
-
-    def __repr__(self) -> str:
-        return self.__str__()
+    return model_tree
 
 
 def deprocess(image: torch.Tensor) -> PIL.Image:
@@ -88,7 +88,167 @@ def get_transforms(h: int, w: int):
     )
 
 
+class DeepDreamModel(nn.Module):
+    """A model that can be used for DeepDream. It takes a base model and a list of block names to select. Using the block names, it creates a new model that only contains the selected blocks. The forward method of this model forwards the input through the selected blocks and returns the activations of the selected blocks. The activations are stored in the `activations` attribute of the model.
+
+    Parameters
+    ----------
+    base_model: nn.Module
+        The base model to use for DeepDream.
+    logger: logging.Logger, optional
+        A logger to use for logging, by default None
+    correct_activation_order: bool, optional
+        If True, the activations are corrected to be in the same order as the `block_names_to_select`, by default True. If the `block_names_to_select` lists the layers in a different order than they are in the model, the order in which the activations are stored will be different. This parameter corrects that order.
+    """
+
+    def __init__(
+        self,
+        base_model: nn.Module,
+        logger: logging.Logger = None,
+        correct_activation_order: bool = True,
+    ):
+        """Initializes the DeepDreamModel."""
+        super(DeepDreamModel, self).__init__()
+        self.logger = logger or create_simple_logger(
+            self.__class__.__name__, env.LOG_LEVEL
+        )
+        self.correct_activation_order = correct_activation_order
+        self.base_model = base_model
+        self.base_model_tree = get_model_tree(base_model)
+        self.all_possible_submodule_keys = create_all_possible_submodule_keys(
+            self.base_model_tree
+        )
+        self.activations = []
+
+    def __str__(self) -> str:
+        string = str(self.blocks)
+        # add a tab to each line
+        final_string = f"""{self.__class__.__name__}(\n{string}\n)"""
+        return final_string
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+    def find_index_of_layer(
+        self,
+        all_possible_submodule_keys: List[str],
+        layer_to_search: str,
+        return_max_only: bool = True,
+    ) -> List[int]:
+        """Finds the index of the layer in the `all_possible_submodule_keys` list. Returns the index of the layer in the list. If `return_max_only` is True, it returns only the maximum index of the layer. If `return_max_only` is False, it returns all the indices of the layer."""
+        matches = []
+        for i, layer in enumerate(all_possible_submodule_keys):
+            if layer_to_search in layer:
+                matches.append(i)
+
+        # if no matches are found, raise an error
+        if not matches:
+            m = f"Layer {layer_to_search} not found in the model. Use the method `print_model_tree` to see the model tree. {all_possible_submodule_keys}"
+            self.logger.error(m)
+            raise ValueError(m)
+        if return_max_only:
+            return [max(matches)]
+        else:
+            return matches
+
+    def get_blocks(
+        self,
+        base_model: nn.Module = None,
+        block_names_to_select: List[str] = None,
+    ) -> Tuple[List[nn.Module], List[str]]:
+        """Gets the blocks from the model that are needed for DeepDream. The blocks are selected based on the `block_names_to_select` list. A hook is added to the activations of the selected blocks to store the activations in the `activations` attribute of the model.
+
+        Parameters
+        ----------
+        base_model: nn.Module, optional
+            The base model to use for DeepDream. If None, the base model passed to the constructor is used, by default None
+        block_names_to_select: List[str]
+            A list of block names to select from the model. The activations of these blocks are stored in the `activations` attribute of the model.
+
+        Returns
+        -------
+        Tuple[List[nn.Module], List[str]]
+            A tuple containing the blocks and the names of the blocks selected from the model.
+        """
+        if base_model is None:
+            base_model = self.base_model
+
+        if block_names_to_select is None:
+            m = "block_names_to_select is None. Please provide a list of block names to select."
+            self.logger.error(m)
+            raise ValueError(m)
+
+        indices = []
+        for l in block_names_to_select:
+            indices.extend(
+                self.find_index_of_layer(self.all_possible_submodule_keys, l)
+            )
+
+        layers_for_activations = [self.all_possible_submodule_keys[i] for i in indices]
+        self.logger.info(f"Layers used for activations hooks: {layers_for_activations}")
+        # get the order of the layers
+        self.activation_order = np.argsort(indices)
+        # add a forward hook to all the activations
+        [
+            base_model.get_submodule(layer).register_forward_hook(
+                lambda module, input, output: self.activations.append(output)
+            )
+            for layer in layers_for_activations
+        ]
+
+        # The index of the last layer to take
+        max_index = max(indices)
+        self.logger.debug(
+            f"Max index: {max_index}, Indices: {indices}, Layers: {layers_for_activations}"
+        )
+
+        # take only those layers that are needed
+        layers_for_model_ = [
+            s.split(".")[0] for s in self.all_possible_submodule_keys[: max_index + 1]
+        ]
+        layers_for_model = []
+        for t in layers_for_model_:
+            if t not in layers_for_model:
+                layers_for_model.append(t)
+
+        self.blocks = [base_model.get_submodule(k) for k in layers_for_model]
+        self.names = [k for k in layers_for_model]
+
+        return self.blocks, self.names
+
+    def print_model_tree(self, add_modules: bool = False) -> None:
+        """Prints the model tree of the base model."""
+        print_model_tree(self.base_model_tree, add_modules=add_modules)
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """The forward method of the model. It forwards the input through the selected blocks and returns the activations of the selected blocks."""
+        self.activations = []
+        # forwards the input through the blocks
+        for name, block in zip(self.names, self.blocks):
+            self.logger.debug(f"Block: {name}")
+            x = block(x)
+
+        if self.correct_activation_order:
+            # correct the order of the activations, so that they are in the same order as the `block_names_to_select`
+            self.activations = [self.activations[i] for i in self.activation_order]
+        return self.activations
+
+
 class DeepDream:
+    """The DeepDream class that can be used to perform DeepDream on an image using a base model. The base model is passed to the constructor along with a list of block names to select. The block names are used to select the blocks from the model that are needed for DeepDream. The class uses `DeepDreamModel` to create a model that only contains the selected blocks. The `dream` method can be used to perform DeepDream on an image.
+
+    Parameters
+    ----------
+    base_model: nn.Module
+        The base model to use for DeepDream.
+    block_names_to_select: List[str]
+        A list of block names to select from the model. The activations of these blocks are stored in the `activations` attribute of the model.
+    logger: logging.Logger, optional
+        A logger to use for logging, by default None
+    wandb_logger_config: dict[str, Any], optional
+        A dictionary containing the configuration for the wandb logger. If provided, it must contain the `name`, and `project` keys. See the `create_wandb_logger` function for more details. If None, no wandb logger is created, by default None
+    """
+
     def __init__(
         self,
         base_model: nn.Module,
@@ -96,25 +256,44 @@ class DeepDream:
         logger: logging.Logger = None,
         wandb_logger_config: dict[str, Any] = None,
     ):
-        self.logger = logger or logging.getLogger(self.__class__.__name__)
+        self.logger = logger or create_simple_logger(
+            self.__class__.__name__, env.LOG_LEVEL
+        )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger.info(f"Using Device: {self.device}")
-
-        self.base_model = base_model.to(self.device)
-        self.base_model.eval()
-        self.model = DeapDreamModel(self.base_model, block_names_to_select).to(
-            self.device
+        self._create_deepdream_model(
+            base_model,
+            block_names_to_select,
         )
 
         if wandb_logger_config:
             # create wandb logger and log the configuration
-            self.wandb_logger = create_wandb_logger(**wandb_logger_config)
-            config = wandb_logger_config.get("config", {})
+            config = wandb_logger_config.copy()
             config["model"] = self.model.__class__.__name__
             config["block_names_to_select"] = block_names_to_select
-            self.wandb_logger.config.update(config)
+            wandb_logger_config["config"] = config
+            self.wandb_logger = create_wandb_logger(**wandb_logger_config)
+        else:
+            self.wandb_logger = None
+
+    def _create_deepdream_model(
+        self,
+        base_model: nn.Module,
+        block_names_to_select: List[str],
+    ):
+        """Creates the DeepDreamModel using the base model and the block names to select."""
+        base_model = base_model.to(self.device)
+        base_model.eval()
+        self.dream_model = DeepDreamModel(base_model)
+        self.dream_model_blocks, self.dream_model_block_names = (
+            self.dream_model.get_blocks(
+                base_model,
+                block_names_to_select,
+            )
+        )
 
     def normalize_grad(self, image: torch.Tensor) -> torch.Tensor:
+        """Normalizes the gradient of the image before performing gradient ascent."""
         # normalize the gradient
         gradient = image.grad.data
         gradient /= gradient.std() + 1e-8
@@ -123,6 +302,7 @@ class DeepDream:
     def _deep_dream(
         self, model: nn.Module, image: torch.Tensor, iterations: int, lr: float
     ) -> torch.Tensor:
+        """The logic for performing DeepDream on an image. It performs gradient ascent on the image using the activations of the model."""
         model.eval()
         image = image.unsqueeze(0).clone()  # add batch dimension
         image.requires_grad = True
@@ -152,7 +332,10 @@ class DeepDream:
         size: tuple,
         preprocess: transforms.Compose,
     ) -> torch.Tensor:
+        """Resizes the image using the given size and preprocesses it."""
         pil_image = deprocess(image)
+        # PIL has (w, h) format
+        size = tuple(reversed(size))
         pil_image = pil_image.resize(size)
         pil_image = preprocess(pil_image)
         return pil_image
@@ -166,19 +349,43 @@ class DeepDream:
         octaves: List[int] = [0],
         plot_image: bool = False,
     ) -> PIL.Image:
+        """The main method to perform DeepDream on an image. It takes an image and performs DeepDream on it using the selected blocks from the model.
+
+        Parameters
+        ----------
+        image: PIL.Image
+            The image on which to perform DeepDream.
+        iterations: int, optional
+            The number of iterations to perform, by default 20
+        lr: float, optional
+            The learning rate to use for gradient ascent, by default 0.05
+        octave_scale: float, optional
+            The scale to use for resizing the image in each octave, by default 1.3
+        octaves: List[int], optional
+            A list of octaves to use for DeepDream, by default [0], which means only one octave is used
+        plot_image: bool, optional
+            If True, the image is plotted at each octave, by default False
+
+        Returns
+        -------
+        PIL.Image
+            The final DeepDream image.
+        """
         original_shape = image.size
+        # PIL has (w, h) format
+        original_shape = tuple(reversed(original_shape))
         transform = get_transforms(*original_shape)
         new_image = transform(image).to(self.device)
         if plot_image:
             image_plotter = ImagePlotter()
         for i in octaves:
-            print(f"Processing octave {i}")
+            self.logger.info(f"Processing octave {i}")
             new_size = tuple([int(dim * (octave_scale**i)) for dim in original_shape])
-            print(f"New size: {new_size}")
+            self.logger.info(f"New size: {new_size}")
             new_image = self.resize_tf_image(
                 new_image, new_size, get_transforms(*new_size)
             )
-            new_image = self._deep_dream(self.model, new_image, iterations, lr)
+            new_image = self._deep_dream(self.dream_model, new_image, iterations, lr)
             if plot_image:
                 image_plotter.update_image(deprocess(new_image), title=f"Octave {i}")
         final_image = self.resize_tf_image(
