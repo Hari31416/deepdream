@@ -342,6 +342,7 @@ class DeepDream:
 
         model.eval()
         image = image.unsqueeze(0).clone()  # add batch dimension
+        image = image.to(self.device)
         image.requires_grad = True
         optimizer = optim.Adam([image], lr=lr)
         if plot_image:
@@ -366,7 +367,7 @@ class DeepDream:
             self.logger.info(f"Iteration {i+1}/{iterations}, Loss: {loss.item()}")
             optimizer.step()
             # clip the image
-            image.data.clamp_(-1, 1)
+            image.data = image.data.clamp_(-1, 1)
             # log the image to wandb each 5 iterations
             if self.wandb_logger and i % 5 == 0:
                 wandb_image = self.wandb_logger.Image(deprocess(image))
@@ -377,16 +378,16 @@ class DeepDream:
                     (i + 1) % plot_image_interval == 0
                 ):
                     image_plotter.update_image(
-                        deprocess(image),
+                        deprocess(image.detach().clone()),
                         title=f"It {i+1}/{iterations}, Loss: {loss.item():.4f}{image_suffix}",
                     )
         if plot_image_interval == "final_image":
             image_plotter.update_image(
-                deprocess(image),
+                deprocess(image.detach().clone()),
                 title=f"Loss: {loss.item():.4f} at Epoch End",
             )
 
-        return image
+        return image.detach()
 
     def resize_tf_image(
         self,
@@ -447,11 +448,11 @@ class DeepDream:
             new_size = tuple([int(dim * (octave_scale**i)) for dim in original_shape])
             self.logger.info(f"New size: {new_size}")
             new_image = self.resize_tf_image(
-                new_image, new_size, get_transforms(*new_size)
+                new_image.detach(), new_size, get_transforms(*new_size)
             )
             new_image = self._deep_dream(
                 self.dream_model,
-                new_image,
+                new_image.detach(),
                 iterations,
                 lr,
                 loss_type=loss_type,
@@ -460,6 +461,6 @@ class DeepDream:
             )
 
         final_image = self.resize_tf_image(
-            new_image, original_shape, get_transforms(*original_shape)
+            new_image.detach(), original_shape, get_transforms(*original_shape)
         )
-        return deprocess(final_image)
+        return deprocess(final_image.detach())
