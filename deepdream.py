@@ -178,14 +178,19 @@ class DeepDreamModel(nn.Module):
             self.logger.error(m)
             raise ValueError(m)
 
+        # to be used to sort the activations and get the index of the last layer
         indices = []
         for l in block_names_to_select:
             indices.extend(
-                self.find_index_of_layer(self.all_possible_submodule_keys, l)
+                self.find_index_of_layer(
+                    self.all_possible_submodule_keys,
+                    l,
+                    return_max_only=True,  # we only need the max index
+                )
             )
 
-        layers_for_activations = [self.all_possible_submodule_keys[i] for i in indices]
-        self.logger.info(f"Layers used for activations hooks: {layers_for_activations}")
+        self.logger.info(f"Indices of layers: {indices}")
+        self.logger.info(f"Layers used for activations hooks: {block_names_to_select}")
         # get the order of the layers
         self.activation_order = np.argsort(indices)
         # add a forward hook to all the activations
@@ -193,13 +198,13 @@ class DeepDreamModel(nn.Module):
             base_model.get_submodule(layer).register_forward_hook(
                 lambda module, input, output: self.activations.append(output)
             )
-            for layer in layers_for_activations
+            for layer in block_names_to_select
         ]
 
         # The index of the last layer to take
         max_index = max(indices)
         self.logger.debug(
-            f"Max index: {max_index}, Indices: {indices}, Layers: {layers_for_activations}"
+            f"Max index: {max_index}, Indices: {indices}, Layers: {block_names_to_select}"
         )
 
         # take only those layers that are needed
@@ -225,13 +230,23 @@ class DeepDreamModel(nn.Module):
         self.activations = []
         # forwards the input through the blocks
         for name, block in zip(self.names, self.blocks):
-            self.logger.debug(f"Block: {name}")
-            x = block(x)
+            # print the exception if there is an error in the block for debugging
+            try:
+                x = block(x)
+            except Exception as e:
+                m = f"Error in block: {name}, {e}"
+                self.logger.error(m)
+                raise ValueError(m)
 
         if self.correct_activation_order:
             # correct the order of the activations, so that they are in the same order as the `block_names_to_select`
-            self.activations = [self.activations[i] for i in self.activation_order]
-        return self.activations
+            temp = list(zip(list(self.activation_order), self.activations))
+            temp.sort(key=lambda x: x[0])
+            self.activations_correct_order = [x[1] for x in temp]
+
+        else:
+            self.activations_correct_order = self.activations
+        return self.activations_correct_order
 
 
 class DeepDream:
