@@ -127,7 +127,7 @@ class ImagePlotter:
         else:
             self.im.set_data(image)
         self.ax.set_title(title)
-        self.ax.title.set_fontsize(20)
+        self.ax.title.set_fontsize(15)
         self.ax.axis("off")
         plt.draw()
         plt.pause(0.01)

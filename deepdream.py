@@ -284,7 +284,7 @@ class DeepDream:
         if wandb_logger_config:
             # create wandb logger and log the configuration
             config = wandb_logger_config.copy()
-            config["model"] = self.model.__class__.__name__
+            config["base_model"] = base_model.__class__.__name__
             config["block_names_to_select"] = block_names_to_select
             wandb_logger_config["config"] = config
             self.wandb_logger = create_wandb_logger(**wandb_logger_config)
@@ -335,6 +335,7 @@ class DeepDream:
         lr: float,
         loss_type: str = "mean",
         plot_image_interval: Union[str, int] = None,
+        image_suffix: str = "",
     ) -> torch.Tensor:
         """The logic for performing DeepDream on an image. It performs gradient ascent on the image using the activations of the model."""
         plot_image = True if plot_image_interval is not None else False
@@ -362,7 +363,7 @@ class DeepDream:
             loss = loss_fn(activations)
             loss.backward()
             self.normalize_grad(image)
-            print(f"Iteration {i+1}/{iterations}, Loss: {loss.item()}")
+            self.logger.info(f"Iteration {i+1}/{iterations}, Loss: {loss.item()}")
             optimizer.step()
             # clip the image
             image.data.clamp_(-1, 1)
@@ -372,13 +373,12 @@ class DeepDream:
                 self.wandb_logger.log({"image": wandb_image})
 
             if plot_image:
-                if (
-                    isinstance(plot_image_interval, int)
-                    and i % plot_image_interval == 0
+                if isinstance(plot_image_interval, int) and (
+                    (i + 1) % plot_image_interval == 0
                 ):
                     image_plotter.update_image(
                         deprocess(image),
-                        title=f"Iteration {i+1}/{iterations}, Loss: {loss.item():.4f}",
+                        title=f"It {i+1}/{iterations}, Loss: {loss.item():.4f}{image_suffix}",
                     )
         if plot_image_interval == "final_image":
             image_plotter.update_image(
@@ -456,6 +456,7 @@ class DeepDream:
                 lr,
                 loss_type=loss_type,
                 plot_image_interval=plot_image_interval,
+                image_suffix=f" Octave: {i}",
             )
 
         final_image = self.resize_tf_image(
