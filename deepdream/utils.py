@@ -1,4 +1,4 @@
-from env import env
+from .env import env
 
 import numpy as np
 import matplotlib.pyplot as plt

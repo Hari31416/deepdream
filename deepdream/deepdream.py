@@ -1,5 +1,5 @@
-from utils import create_simple_logger, create_wandb_logger, ImagePlotter
-from env import env
+from .utils import create_simple_logger, create_wandb_logger, ImagePlotter
+from .env import env
 import torch
 import torch.nn as nn
 import torch.optim as optim
