@@ -299,20 +299,52 @@ class DeepDream:
         gradient /= gradient.std() + 1e-8
         return gradient
 
+    def activation_loss_norm(self, activations):
+        loss = 0
+        for activation in activations:
+            activation_norm = activation.norm()
+            loss -= activation_norm  # gradient ascent
+        return loss
+
+    def activation_loss_mean(self, activations):
+        loss = 0
+        for activation in activations:
+            loss -= activation.mean()  # gradient ascent
+        return loss
+
     def _deep_dream(
-        self, model: nn.Module, image: torch.Tensor, iterations: int, lr: float
+        self,
+        model: nn.Module,
+        image: torch.Tensor,
+        iterations: int,
+        lr: float,
+        loss_type: str = "mean",
+        plot_image_interval: Union[str, int] = None,
     ) -> torch.Tensor:
         """The logic for performing DeepDream on an image. It performs gradient ascent on the image using the activations of the model."""
+        plot_image = True if plot_image_interval is not None else False
+
         model.eval()
         image = image.unsqueeze(0).clone()  # add batch dimension
         image.requires_grad = True
         optimizer = optim.Adam([image], lr=lr)
+        if plot_image:
+            image_plotter = ImagePlotter()
+        if loss_type == "mean":
+            self.logger.debug("Using mean of activations for loss")
+            loss_fn = self.activation_loss_mean
+        elif loss_type == "norm":
+            self.logger.debug("Using norm of activations for loss")
+            loss_fn = self.activation_loss_norm
+        else:
+            m = f"`loss_type` must either be mean or norm, found: {loss_type}"
+            self.logger.error(m)
+            raise ValueError(m)
+
         for i in tqdm(range(iterations)):
             optimizer.zero_grad()
             activations = model(image)
-            loss = 0
-            for activation in activations:
-                loss -= activation.mean()  # perform gradient ascent
+            loss = loss_fn(activations)
             loss.backward()
             self.normalize_grad(image)
             print(f"Iteration {i+1}/{iterations}, Loss: {loss.item()}")
@@ -323,6 +355,21 @@ class DeepDream:
             if self.wandb_logger and i % 5 == 0:
                 wandb_image = self.wandb_logger.Image(deprocess(image))
                 self.wandb_logger.log({"image": wandb_image})
+
+            if plot_image:
+                if (
+                    isinstance(plot_image_interval, int)
+                    and i % plot_image_interval == 0
+                ):
+                    image_plotter.update_image(
+                        deprocess(image),
+                        title=f"Iteration {i+1}/{iterations}, Loss: {loss.item():.4f}",
+                    )
+        if plot_image_interval == "final_image":
+            image_plotter.update_image(
+                deprocess(image),
+                title=f"Loss: {loss.item():.4f} at Epoch End",
+            )
 
         return image
 
@@ -347,7 +394,8 @@ class DeepDream:
         lr: float = 0.05,
         octave_scale: float = 1.3,
         octaves: List[int] = [0],
-        plot_image: bool = False,
+        loss_type: str = "mean",
+        plot_image_interval: Union[str, int] = None,
     ) -> PIL.Image:
         """The main method to perform DeepDream on an image. It takes an image and performs DeepDream on it using the selected blocks from the model.
 
@@ -363,8 +411,10 @@ class DeepDream:
             The scale to use for resizing the image in each octave, by default 1.3
         octaves: List[int], optional
             A list of octaves to use for DeepDream, by default [0], which means only one octave is used
-        plot_image: bool, optional
-            If True, the image is plotted at each octave, by default False
+        loss_type: str, optional
+            Loss function to use. Must be either 'mean' or 'norm'. By Default 'mean'
+        plot_image_interval: Union[str, int], optional
+            The interval with which to plot the dreamed image. If None, no image is plotted. If string, must be equal to 'final_image' which plots the final image.
 
         Returns
         -------
@@ -376,8 +426,7 @@ class DeepDream:
         original_shape = tuple(reversed(original_shape))
         transform = get_transforms(*original_shape)
         new_image = transform(image).to(self.device)
-        if plot_image:
-            image_plotter = ImagePlotter()
+
         for i in octaves:
             self.logger.info(f"Processing octave {i}")
             new_size = tuple([int(dim * (octave_scale**i)) for dim in original_shape])
@@ -385,9 +434,15 @@ class DeepDream:
             new_image = self.resize_tf_image(
                 new_image, new_size, get_transforms(*new_size)
             )
-            new_image = self._deep_dream(self.dream_model, new_image, iterations, lr)
-            if plot_image:
-                image_plotter.update_image(deprocess(new_image), title=f"Octave {i}")
+            new_image = self._deep_dream(
+                self.dream_model,
+                new_image,
+                iterations,
+                lr,
+                loss_type=loss_type,
+                plot_image_interval=plot_image_interval,
+            )
+
         final_image = self.resize_tf_image(
             new_image, original_shape, get_transforms(*original_shape)
         )
