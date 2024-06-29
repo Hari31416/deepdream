@@ -46,12 +46,11 @@ def create_all_possible_submodule_keys(
 ) -> List[str]:
     keys = []
     for name, module in tree.items():
+        keys.append(f"{prefix}{name}")
         if isinstance(module, dict):
             keys.extend(
                 create_all_possible_submodule_keys(module, prefix=f"{prefix}{name}.")
             )
-        else:
-            keys.append(f"{prefix}{name}")
     return keys
 
 
