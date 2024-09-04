@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as transforms
+from torchvision.transforms import functional as F
 
 import numpy as np
 import PIL.Image
@@ -85,6 +86,28 @@ def get_transforms(h: int, w: int):
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ]
     )
+
+
+def random_jitter(image, max_pixels=16):
+    dx, dy = np.random.randint(-max_pixels, max_pixels + 1, 2)
+    return F.affine(image, 0, (dx, dy), 1, 0)
+
+
+def random_scale(image, min_scale=0.8, max_scale=1.2):
+    scale = np.random.uniform(min_scale, max_scale)
+    return F.affine(image, 0, (0, 0), scale, 0)
+
+
+def random_rotate(image, max_angle=15):
+    angle = np.random.uniform(-max_angle, max_angle)
+    return F.rotate(image, angle)
+
+
+def apply_transformations(image):
+    image = random_jitter(image)
+    image = random_scale(image)
+    image = random_rotate(image)
+    return image
 
 
 class DeepDreamModel(nn.Module):
@@ -358,8 +381,9 @@ class DeepDream:
             raise ValueError(m)
 
         for i in tqdm(range(iterations)):
+            transformed_image = apply_transformations(image).to(self.device)
             optimizer.zero_grad()
-            activations = model(image)
+            activations = model(transformed_image)
             loss = loss_fn(activations)
             loss.backward()
             self.normalize_grad(image)
